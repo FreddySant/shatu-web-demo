@@ -10,17 +10,26 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:emulator": "vite --mode emulator",
+    "emulators": "firebase emulators:start --only auth,firestore --project demo-shatu",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:cloud": "firebase emulators:exec --only auth,firestore --project demo-shatu \"vitest run --config vitest.cloud.config.ts\""
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase-tools": "^15.33.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.7",
     "vitest": "^3.2.7"
   },
   "dependencies": {
     "@fontsource-variable/archivo": "^5.3.0",
-    "@fontsource-variable/martian-mono": "^5.3.0"
+    "@fontsource-variable/martian-mono": "^5.3.0",
+    "firebase": "^12.19.0"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.13.7"
   }
 }

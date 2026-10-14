@@ -12,14 +12,37 @@ permissions:
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
+    env:
+      # The Firebase project the site connects to. These identify the project and
+      # are not secret; the Firestore rules protect the data.
+      VITE_FIREBASE_API_KEY: ${{ vars.FIREBASE_API_KEY }}
+      VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.FIREBASE_AUTH_DOMAIN }}
+      VITE_FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+      VITE_FIREBASE_APP_ID: ${{ vars.FIREBASE_APP_ID }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
+      # The Firebase emulators run on Java.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
       - run: npm ci
       - run: npm test
+      - name: Test the database rules and accounts on the Firebase emulators
+        run: npm run test:cloud
+      - name: Check the Firebase settings
+        if: github.event_name != 'pull_request'
+        run: |
+          for name in VITE_FIREBASE_API_KEY VITE_FIREBASE_AUTH_DOMAIN VITE_FIREBASE_PROJECT_ID VITE_FIREBASE_APP_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name#VITE_} is not set. Add it under Settings > Secrets and variables > Actions > Variables."
+              exit 1
+            fi
+          done
       - run: npm run build
       - uses: actions/upload-pages-artifact@v5
         if: github.event_name != 'pull_request'

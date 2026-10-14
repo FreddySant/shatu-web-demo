@@ -1,0 +1,44 @@
+rules_version = '2';
+
+// Who may read and write what in the ShaTu database.
+//
+// users/{uid}         One document per student: name, email, progress and history.
+//                     Each student reads and writes only their own document.
+// instructors/{email} One empty document per instructor, keyed by email in lower case.
+//                     Added by the project owner in the Firebase console. An instructor
+//                     with a verified email can read every student's document.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isInstructor() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && exists(/databases/$(database)/documents/instructors/$(request.auth.token.email));
+    }
+
+    function validStudent() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['displayName', 'email', 'progress', 'activity', 'created', 'updated'])
+        && d.displayName is string && d.displayName.size() > 0 && d.displayName.size() <= 80
+        && d.email == request.auth.token.email
+        && d.progress is map
+        && d.activity is list && d.activity.size() <= 30;
+    }
+
+    match /users/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || isInstructor());
+      allow list: if isInstructor();
+      allow create, update: if signedIn() && request.auth.uid == uid && validStudent();
+      allow delete: if false;
+    }
+
+    match /instructors/{email} {
+      allow get: if signedIn() && request.auth.token.email == email;
+      allow list, write: if false;
+    }
+  }
+}

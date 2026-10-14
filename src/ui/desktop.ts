@@ -7,15 +7,17 @@ import { h, replace } from './dom';
 import { LAB_STEPS, labView } from './lab';
 import { menuBar, type MenuEntry } from './menus';
 import { clock, initials, levelMeter } from './meters';
-import { icon, type IconName } from './overlay';
 import { practiceView } from './practice';
 import { progressView } from './progressview';
-import { getAccount, getActivity, getProgress, signOut, subscribe } from './store';
+import type { Cloud } from '../cloud/service';
+import { classView } from './classview';
+import { icon, openDialog, type IconName } from './overlay';
+import { closeSession, flush, getAccount, getActivity, getProgress, getSaveState, subscribe } from './store';
 import { treeView, type TreeNode } from './tree';
 import type { LogTone, PanelTabId, Shell, View } from './types';
 import { verifyView } from './verify';
 
-export type Section = 'practice' | 'lab' | 'progress' | 'verify';
+export type Section = 'practice' | 'lab' | 'progress' | 'verify' | 'class';
 
 interface Layout {
   tree: number;
@@ -69,7 +71,7 @@ function go(hash: string): void {
 
 const TONE_ICON: Record<LogTone, IconName> = { info: 'info', ok: 'check', bad: 'close', milestone: 'layers' };
 
-export function mountDesktop(root: HTMLElement): { open(section: Section, param?: string): void; currentRoute(): string; destroy(): void } {
+export function mountDesktop(root: HTMLElement, cloud: Cloud): { open(section: Section, param?: string): void; currentRoute(): string; destroy(): void } {
   const phone = window.matchMedia('(max-width: 760px)');
   const narrow = window.matchMedia('(max-width: 1100px)');
   const layout = loadLayout();
@@ -119,14 +121,33 @@ export function mountDesktop(root: HTMLElement): { open(section: Section, param?
 
   const account = () => getAccount()!;
 
-  const doSignOut = () => {
+  const finishSignOut = async () => {
+    await closeSession();
+    location.hash = '#/';
+  };
+
+  /** Closes the documents (which records any unfinished problem), saves, then signs out. */
+  const doSignOut = async () => {
     for (const view of views.values()) view.dispose();
     views.clear();
     order.length = 0;
     active = null;
-    signOut();
-    location.hash = '#/';
+    try {
+      await flush();
+    } catch {
+      openDialog({
+        title: 'Progress not saved',
+        body: h('p', null, 'Your latest progress could not be saved to your account. Check your internet connection. If you sign out now, that progress is lost.'),
+        cancelLabel: 'Stay signed in',
+        confirm: { label: 'Sign out anyway', danger: true, action: finishSignOut },
+      });
+      openRecommended();
+      return;
+    }
+    await finishSignOut();
   };
+
+  const openAccount = () => accountDialog(cloud);
 
   const openRecommended = () => go(`#/app/practice/${recommend(getProgress()).exercise}`);
   const resetProgress = () => confirmReset(() => shell.log('Progress reset. Every skill is back at level 1.'));
@@ -141,10 +162,10 @@ export function mountDesktop(root: HTMLElement): { open(section: Section, param?
     { label: 'Close tab', icon: 'close', disabled: !active, action: () => active && closeTab(active.key) },
     { label: 'Close all tabs', disabled: order.length === 0, action: closeAll },
     { kind: 'separator' },
-    { label: 'Account settings…', icon: 'settings', action: accountDialog },
+    { label: 'Account settings…', icon: 'settings', action: openAccount },
     { label: 'Reset progress…', icon: 'reset', action: resetProgress },
     { kind: 'separator' },
-    { label: 'Sign out', icon: 'logout', action: doSignOut },
+    { label: 'Sign out', icon: 'logout', action: () => void doSignOut() },
   ];
 
   const practiceItems = (): MenuEntry[] => {
@@ -184,6 +205,7 @@ export function mountDesktop(root: HTMLElement): { open(section: Section, param?
     { label: 'Output', icon: 'terminal', action: () => shell.showPanel('output') },
     { label: 'History', icon: 'clock', action: () => shell.showPanel('history') },
     { label: 'Progress report', icon: 'table', action: () => go('#/app/progress') },
+    ...(account().instructor ? [{ label: 'Class progress', icon: 'table', action: () => go('#/app/class') } as MenuEntry] : []),
     { kind: 'separator' },
     { kind: 'check', label: 'Dark theme', checked: isDark(), action: () => setTheme(!isDark()) },
     { label: 'Reset window layout', icon: 'sidebar', action: resetLayout },
@@ -197,9 +219,9 @@ export function mountDesktop(root: HTMLElement): { open(section: Section, param?
   ];
 
   const userItems = (): MenuEntry[] => [
-    { kind: 'header', content: h('div', null, h('strong', null, account().displayName), h('span', null, `@${account().username}`)) },
-    { label: 'Account settings…', icon: 'settings', action: accountDialog },
-    { label: 'Sign out', icon: 'logout', action: doSignOut },
+    { kind: 'header', content: h('div', null, h('strong', null, account().displayName), h('span', null, account().email)) },
+    { label: 'Account settings…', icon: 'settings', action: openAccount },
+    { label: 'Sign out', icon: 'logout', action: () => void doSignOut() },
   ];
 
   const menus = menuBar([
@@ -264,6 +286,7 @@ export function mountDesktop(root: HTMLElement): { open(section: Section, param?
         children: [
           { id: 'progress', label: 'Progress', icon: 'table', open: () => go('#/app/progress') },
           { id: 'verify', label: 'Verification', icon: 'shield', open: () => go('#/app/verify') },
+          ...(account().instructor ? [{ id: 'class', label: 'Class progress', icon: 'table' as const, open: () => go('#/app/class') }] : []),
         ],
       },
     ];
@@ -608,10 +631,10 @@ export function mountDesktop(root: HTMLElement): { open(section: Section, param?
     replace(statusLeft, h('span', { class: `status-icon ${statusTone}` }, icon(TONE_ICON[statusTone], 12)), h('span', { class: 'status-text' }, statusMessage));
     replace(
       statusRight,
-      h('span', { class: 'status-field' }, icon('user', 12), account().username),
+      h('span', { class: 'status-field' }, icon('user', 12), account().email),
       (active?.status() ?? []).map((text) => h('span', { class: 'status-field' }, text)),
       h('span', { class: 'status-field' }, `Course ${totals.percent}%`),
-      h('span', { class: 'status-field saved' }, 'Saved in this browser'),
+      h('span', { class: `status-field saved ${getSaveState()}` }, getSaveState() === 'saved' ? 'Saved to your account' : getSaveState() === 'saving' ? 'Saving' : 'Not saved, retrying'),
     );
   }
 
@@ -637,6 +660,8 @@ export function mountDesktop(root: HTMLElement): { open(section: Section, param?
         return progressView(resetProgress);
       case 'verify':
         return verifyView(shell);
+      case 'class':
+        return classView(shell, cloud);
     }
   }
 
@@ -753,7 +778,16 @@ export function mountDesktop(root: HTMLElement): { open(section: Section, param?
   replace(root, desk);
   applyLayout();
   renderHistory();
-  shell.log(`Signed in as ${account().username}.`);
+  shell.log(`Signed in as ${account().email}. Progress is saved to your account.`);
+  let welcome: string | null = null;
+  try {
+    welcome = sessionStorage.getItem('shatu.welcome');
+    sessionStorage.removeItem('shatu.welcome');
+  } catch {
+    // Only used for the line below.
+  }
+  if (welcome === 'sent') shell.log(`Account created. A verification link was sent to ${account().email}.`, 'ok');
+  if (welcome === 'failed') shell.log('Account created, but the verification email could not be sent. Send it again from File > Account settings.', 'bad');
 
   return {
     open,

@@ -1,8 +1,8 @@
-import { accountExists, browserStore, deleteAccount, passwordStrength, register, signIn, startSession, usernameProblem } from '../engine/auth';
-import { resetProgress } from '../engine/progress';
+import type { Cloud } from '../cloud/service';
+import { passwordStrength } from '../engine/account';
 import { h } from './dom';
-import { icon, openDialog } from './overlay';
-import { setAccount } from './store';
+import { icon } from './overlay';
+import { openSession } from './store';
 
 export type StartMode = 'signin' | 'register' | 'forgot';
 
@@ -12,7 +12,7 @@ interface Field {
   error: HTMLElement;
 }
 
-function field(id: string, label: string, type: 'text' | 'password', options: { autocomplete: string; hint?: string } = { autocomplete: 'off' }): Field {
+function field(id: string, label: string, type: 'text' | 'email' | 'password', options: { autocomplete: string; hint?: string } = { autocomplete: 'off' }): Field {
   const input = h('input', { id, name: id, type, autocomplete: options.autocomplete, spellcheck: 'false', 'aria-describedby': `${id}-error${options.hint ? ` ${id}-hint` : ''}` });
   const error = h('p', { class: 'field-error', id: `${id}-error`, 'aria-live': 'polite' });
   const control =
@@ -53,8 +53,21 @@ function showError(f: Field, message: string): void {
   f.input.focus();
 }
 
-function signInForm(next: string): HTMLElement {
-  const username = field('username', 'Username', 'text', { autocomplete: 'username' });
+/** Runs a submit with the button showing what is happening, and always re-enables it. */
+async function busy<T>(button: HTMLButtonElement, working: string, task: () => Promise<T>): Promise<T> {
+  const label = button.textContent ?? '';
+  button.disabled = true;
+  button.textContent = working;
+  try {
+    return await task();
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+function signInForm(cloud: Cloud, next: string): HTMLElement {
+  const email = field('email', 'Email', 'email', { autocomplete: 'username' });
   const password = field('password', 'Password', 'password', { autocomplete: 'current-password' });
   const formError = h('p', { class: 'form-error', role: 'alert' });
   const submit = h('button', { class: 'btn block', type: 'submit' }, 'Sign in');
@@ -66,43 +79,42 @@ function signInForm(next: string): HTMLElement {
       onsubmit: async (event: Event) => {
         event.preventDefault();
         formError.textContent = '';
-        if (!username.input.value.trim()) return showError(username, 'Enter your username.');
-        if (!password.input.value) return showError(password, 'Enter your password.');
-        submit.disabled = true;
-        submit.textContent = 'Signing in';
-        let result: Awaited<ReturnType<typeof signIn>>;
-        try {
-          result = await signIn(browserStore, username.input.value, password.input.value);
-        } catch {
-          result = { ok: false, message: 'Sign-in failed in this browser. Try again.' };
-        } finally {
-          submit.disabled = false;
-          submit.textContent = 'Sign in';
-        }
-        if (!result.ok) {
-          formError.textContent = result.message;
-          password.input.value = '';
-          password.input.focus();
+        const problem = await busy(submit, 'Signing in', async () => {
+          const result = await cloud.signIn(email.input.value, password.input.value);
+          if (!result.ok) return result;
+          try {
+            await openSession(result.value);
+          } catch {
+            await cloud.signOut();
+            return { ok: false as const, field: undefined, message: 'Signed in, but your progress could not be loaded. Check your connection and try again.' };
+          }
+          return null;
+        });
+        if (!problem) {
+          location.replace(next || '#/app');
           return;
         }
-        setAccount(result.value);
-        location.replace(next || '#/app');
+        if (problem.field === 'email') return showError(email, problem.message);
+        if (problem.field === 'password') return showError(password, problem.message);
+        formError.textContent = problem.message;
+        password.input.value = '';
+        password.input.focus();
       },
     },
     h('h2', { class: 'start-title' }, 'Sign in'),
-    username.wrap,
+    email.wrap,
     password.wrap,
     formError,
     submit,
     h('div', { class: 'start-links' }, h('a', { href: '#/register' }, 'Create account'), h('a', { href: '#/forgot' }, 'Forgot password')),
   );
-  queueMicrotask(() => username.input.focus());
+  queueMicrotask(() => email.input.focus());
   return form;
 }
 
-function registerForm(): HTMLElement {
+function registerForm(cloud: Cloud): HTMLElement {
   const name = field('displayName', 'Full name', 'text', { autocomplete: 'name' });
-  const username = field('username', 'Username', 'text', { autocomplete: 'username', hint: '3 to 24 letters, numbers, dots, dashes or underscores' });
+  const email = field('email', 'Email', 'email', { autocomplete: 'email', hint: 'Your school email works best. A verification link is sent to it.' });
   const password = field('password', 'Password', 'password', { autocomplete: 'new-password', hint: 'At least 8 characters, with a letter and a number' });
   const confirm = field('confirm', 'Confirm password', 'password', { autocomplete: 'new-password' });
   const meterBar = h('span', { class: 'meter-bar' });
@@ -115,16 +127,9 @@ function registerForm(): HTMLElement {
     meter.dataset.score = String(s.score);
     meterLabel.textContent = s.label;
   });
-  username.input.addEventListener('blur', () => {
-    const problem = username.input.value ? usernameProblem(username.input.value) : null;
-    if (problem) {
-      username.error.textContent = problem;
-      username.wrap.classList.add('invalid');
-    }
-  });
   const formError = h('p', { class: 'form-error', role: 'alert' });
   const submit = h('button', { class: 'btn block', type: 'submit' }, 'Create account');
-  const fields: Record<string, Field> = { displayName: name, username, password, confirm };
+  const fields: Record<string, Field> = { displayName: name, email, password, confirm };
   const form = h(
     'form',
     {
@@ -133,31 +138,33 @@ function registerForm(): HTMLElement {
       onsubmit: async (event: Event) => {
         event.preventDefault();
         formError.textContent = '';
-        submit.disabled = true;
-        submit.textContent = 'Creating account';
-        let result: Awaited<ReturnType<typeof register>>;
-        try {
-          result = await register(browserStore, { displayName: name.input.value, username: username.input.value, password: password.input.value, confirm: confirm.input.value });
-        } catch {
-          result = { ok: false, message: 'The account could not be created in this browser. Try again.' };
-        } finally {
-          submit.disabled = false;
-          submit.textContent = 'Create account';
-        }
-        if (!result.ok) {
-          const target = result.field ? fields[result.field] : undefined;
-          if (target) showError(target, result.message);
-          else formError.textContent = result.message;
+        const problem = await busy(submit, 'Creating account', async () => {
+          const result = await cloud.register({ displayName: name.input.value, email: email.input.value, password: password.input.value, confirm: confirm.input.value });
+          if (!result.ok) return result;
+          try {
+            await openSession(result.value.account);
+          } catch {
+            return { ok: false as const, field: undefined, message: 'Your account was created, but your progress could not be loaded. Sign in again.' };
+          }
+          try {
+            sessionStorage.setItem('shatu.welcome', result.value.verificationSent ? 'sent' : 'failed');
+          } catch {
+            // Only used for the welcome message in the Output panel.
+          }
+          return null;
+        });
+        if (!problem) {
+          location.replace('#/app');
           return;
         }
-        startSession(browserStore, result.value);
-        setAccount(result.value);
-        location.replace('#/app');
+        const target = problem.field ? fields[problem.field] : undefined;
+        if (target) showError(target, problem.message);
+        else formError.textContent = problem.message;
       },
     },
     h('h2', { class: 'start-title' }, 'Create account'),
     name.wrap,
-    username.wrap,
+    email.wrap,
     password.wrap,
     confirm.wrap,
     formError,
@@ -168,66 +175,73 @@ function registerForm(): HTMLElement {
   return form;
 }
 
-function forgotForm(): HTMLElement {
-  const username = field('username', 'Username', 'text', { autocomplete: 'username' });
+function forgotForm(cloud: Cloud): HTMLElement {
+  const email = field('email', 'Email', 'email', { autocomplete: 'username' });
   const done = h('p', { class: 'form-note', role: 'status' });
-  const submit = h('button', { class: 'btn danger block', type: 'submit' }, 'Remove account');
+  const formError = h('p', { class: 'form-error', role: 'alert' });
+  const submit = h('button', { class: 'btn block', type: 'submit' }, 'Send reset link');
   const form = h(
     'form',
     {
       class: 'start-form',
       novalidate: true,
-      onsubmit: (event: Event) => {
+      onsubmit: async (event: Event) => {
         event.preventDefault();
         done.textContent = '';
-        const name = username.input.value.trim();
-        if (!name) return showError(username, 'Enter the username.');
-        if (!accountExists(browserStore, name)) return showError(username, 'There is no account with that username in this browser.');
-        openDialog({
-          title: 'Remove account',
-          body: h('p', null, `Remove the account "${name}" and all of its progress from this browser? This cannot be undone.`),
-          confirm: {
-            label: 'Remove account',
-            danger: true,
-            action: () => {
-              const result = deleteAccount(browserStore, name);
-              if (!result.ok) {
-                showError(username, result.message);
-                return;
-              }
-              resetProgress(result.value);
-              username.input.value = '';
-              done.textContent = 'Account removed from this browser. You can create it again.';
-            },
-          },
-        });
+        formError.textContent = '';
+        const result = await busy(submit, 'Sending', () => cloud.sendReset(email.input.value));
+        if (!result.ok) {
+          if (result.field === 'email') showError(email, result.message);
+          else formError.textContent = result.message;
+          return;
+        }
+        done.textContent = 'If an account uses that email, a link to choose a new password is on its way. Check your inbox and spam folder.';
       },
     },
     h('h2', { class: 'start-title' }, 'Forgot password'),
-    h('p', { class: 'start-note' }, 'Passwords are kept only as a hash in this browser, so they cannot be recovered. Remove the account and its progress, then create it again.'),
-    username.wrap,
+    h('p', { class: 'start-note' }, 'Enter the email you signed up with to get a link for choosing a new password.'),
+    email.wrap,
+    formError,
     submit,
     done,
-    h('div', { class: 'start-links' }, h('a', { href: '#/register' }, 'Create account'), h('a', { href: '#/' }, 'Back to sign in')),
+    h('div', { class: 'start-links' }, h('a', { href: '#/' }, 'Back to sign in')),
   );
-  queueMicrotask(() => username.input.focus());
+  queueMicrotask(() => email.input.focus());
   return form;
 }
 
-/** The program's start screen: name, logo and the sign-in box, like the desktop ShaTu splash. */
-export function startScreen(mode: StartMode, next = ''): HTMLElement {
-  const form = mode === 'register' ? registerForm() : mode === 'forgot' ? forgotForm() : signInForm(next);
-  const logo = h('span', { class: 'start-logo', 'aria-hidden': 'true' }, [...'01010011'].map((bit) => h('i', { class: bit === '1' ? 'on' : '' })));
+function startLogo(): HTMLElement {
+  return h('span', { class: 'start-logo', 'aria-hidden': 'true' }, [...'01010011'].map((bit) => h('i', { class: bit === '1' ? 'on' : '' })));
+}
+
+function frame(...content: Node[]): HTMLElement {
   return h(
     'div',
     { class: 'start' },
     h(
       'main',
       { class: 'start-window' },
-      h('div', { class: 'start-head' }, logo, h('div', null, h('h1', null, 'ShaTu'), h('p', null, 'SHA-256 Tutor'))),
+      h('div', { class: 'start-head' }, startLogo(), h('div', null, h('h1', null, 'ShaTu'), h('p', null, 'SHA-256 Tutor'))),
       h('p', { class: 'start-tag' }, 'An intelligent tutoring system for the SHA-256 hash algorithm.'),
-      form,
+      ...content,
     ),
-    h('footer', { class: 'start-foot' }, h('span', null, 'CS493 Senior Capstone proof of concept'), h('span', null, 'Accounts are stored in this browser only'), h('span', null, 'Not an official Regis University site')),
+    h('footer', { class: 'start-foot' }, h('span', null, 'CS493 Senior Capstone proof of concept'), h('span', null, 'Accounts and progress are stored with Firebase'), h('span', null, 'Not an official Regis University site')),
+  );
+}
+
+/** The program's start screen: name, logo and the sign-in box, like the desktop ShaTu splash. */
+export function startScreen(cloud: Cloud, mode: StartMode, next = ''): HTMLElement {
+  return frame(mode === 'register' ? registerForm(cloud) : mode === 'forgot' ? forgotForm(cloud) : signInForm(cloud, next));
+}
+
+/** Shown while Firebase checks whether someone is already signed in. */
+export function loadingScreen(text: string): HTMLElement {
+  return frame(h('p', { class: 'start-loading', role: 'status' }, text));
+}
+
+/** Shown when this copy was built without a Firebase project, or the database could not be reached. */
+export function problemScreen(title: string, text: string, retry?: () => void): HTMLElement {
+  return frame(
+    h('div', { class: 'start-form' }, h('h2', { class: 'start-title' }, title), h('p', { class: 'start-note' }, text), retry ? h('button', { class: 'btn block', type: 'button', onclick: retry }, 'Try again') : null),
   );
 }

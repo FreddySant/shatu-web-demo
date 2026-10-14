@@ -1,8 +1,8 @@
 import { EXERCISES, exerciseById, type ExerciseId } from './exercises';
 
 /**
- * The student model: what the tutor remembers about each skill. It lives in
- * the browser, so nothing leaves the student's machine.
+ * The student model: what the tutor remembers about each skill. It is saved
+ * to the student's account, so it follows them to any computer.
  */
 export interface SkillRecord {
   attempts: number;
@@ -21,9 +21,6 @@ export type ProgressMap = Partial<Record<ExerciseId, SkillRecord>>;
 /** Correct answers in a row needed to move up a level. */
 export const STREAK_TO_LEVEL_UP = 3;
 
-const progressKey = (username: string) => `shatu.progress.v3.${username.toLowerCase()}`;
-const activityKey = (username: string) => `shatu.activity.v1.${username.toLowerCase()}`;
-
 export const emptyRecord = (): SkillRecord => ({
   attempts: 0,
   correct: 0,
@@ -33,43 +30,6 @@ export const emptyRecord = (): SkillRecord => ({
   mastered: false,
   lastPracticed: 0,
 });
-
-function read<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    // Storage can be blocked, for example in a private window. Start fresh.
-    return fallback;
-  }
-}
-
-function write(key: string, value: unknown): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // Without storage the tutor still works; progress just isn't remembered.
-  }
-}
-
-/** Each account keeps its own progress. */
-export function loadProgress(username: string): ProgressMap {
-  return read<ProgressMap>(progressKey(username), {});
-}
-
-export function saveProgress(username: string, progress: ProgressMap): void {
-  write(progressKey(username), progress);
-}
-
-export function resetProgress(username: string): ProgressMap {
-  try {
-    localStorage.removeItem(progressKey(username));
-    localStorage.removeItem(activityKey(username));
-  } catch {
-    // Nothing stored, nothing to clear.
-  }
-  return {};
-}
 
 /** One finished problem, for the recent activity list. */
 export interface ActivityEvent {
@@ -86,14 +46,12 @@ export interface ActivityEvent {
   review?: boolean;
 }
 
-export function loadActivity(username: string): ActivityEvent[] {
-  return read<ActivityEvent[]>(activityKey(username), []);
-}
+/** How many finished problems the history keeps. */
+export const ACTIVITY_LIMIT = 30;
 
-export function addActivity(username: string, event: ActivityEvent): ActivityEvent[] {
-  const next = [event, ...loadActivity(username)].slice(0, 30);
-  write(activityKey(username), next);
-  return next;
+/** Adds a finished problem to the front of the history and keeps the most recent ones. */
+export function withActivity(list: ActivityEvent[], event: ActivityEvent): ActivityEvent[] {
+  return [event, ...list].slice(0, ACTIVITY_LIMIT);
 }
 
 export function record(progress: ProgressMap, id: ExerciseId): SkillRecord {

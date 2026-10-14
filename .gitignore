@@ -2,3 +2,9 @@ node_modules/
 dist/
 coverage/
 *.log
+
+# Local Firebase settings (see README). Never committed.
+.env.local
+.env.*.local
+*-debug.log
+.firebase/

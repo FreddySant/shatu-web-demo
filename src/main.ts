@@ -2,12 +2,14 @@ import '@fontsource-variable/archivo/wdth.css';
 import '@fontsource-variable/martian-mono/wdth.css';
 import './styles/main.css';
 
+import { cloud } from './cloud';
+import type { Cloud } from './cloud/service';
 import { isExerciseId } from './engine/exercises';
 import { recommend } from './engine/policy';
 import { mountDesktop } from './ui/desktop';
 import { replace } from './ui/dom';
-import { startScreen } from './ui/start';
-import { getAccount, getProgress } from './ui/store';
+import { loadingScreen, problemScreen, startScreen } from './ui/start';
+import { connectCloud, dropSession, getAccount, getProgress, openSession } from './ui/store';
 
 try {
   const saved = localStorage.getItem('shatu.theme');
@@ -27,7 +29,7 @@ function leaveDesktop(): void {
   document.body.classList.remove('in-app');
 }
 
-function route(): void {
+function route(db: Cloud): void {
   const hash = location.hash.replace(/^#\/?/, '');
   const [section, a, b] = hash.split('/').filter(Boolean);
 
@@ -40,7 +42,7 @@ function route(): void {
     leaveDesktop();
     const mode = section === 'register' ? 'register' : section === 'forgot' ? 'forgot' : 'signin';
     document.title = mode === 'register' ? 'Create account | ShaTu' : mode === 'forgot' ? 'Forgot password | ShaTu' : 'ShaTu: SHA-256 Tutor';
-    replace(root, startScreen(mode, section === 'signin' && a ? decodeURIComponent(a) : ''));
+    replace(root, startScreen(db, mode, section === 'signin' && a ? decodeURIComponent(a) : ''));
     return;
   }
 
@@ -51,16 +53,43 @@ function route(): void {
   }
   if (!desktop) {
     document.body.classList.add('in-app');
-    desktop = mountDesktop(root);
+    desktop = mountDesktop(root, db);
   }
-  document.title = 'ShaTu: SHA-256 Tutor';
 
   if (a === 'practice' && b && isExerciseId(b)) desktop.open('practice', b);
   else if (a === 'lab') desktop.open('lab', b);
   else if (a === 'progress') desktop.open('progress');
   else if (a === 'verify') desktop.open('verify');
+  else if (a === 'class' && getAccount()?.instructor) desktop.open('class');
   else desktop.open('practice', recommend(getProgress()).exercise);
 }
 
-window.addEventListener('hashchange', route);
-route();
+async function start(db: Cloud): Promise<void> {
+  replace(root, loadingScreen('Starting ShaTu'));
+  try {
+    const account = await db.current();
+    if (account) {
+      replace(root, loadingScreen('Loading your progress'));
+      await openSession(account);
+    }
+  } catch {
+    replace(root, problemScreen('Could not reach the server', 'ShaTu could not connect to its database. Check your internet connection and try again.', () => void start(db)));
+    return;
+  }
+  // Signed out somewhere else, such as another tab: go back to the start screen.
+  db.onSignedOut(() => {
+    if (!getAccount()) return;
+    leaveDesktop();
+    dropSession();
+    location.hash = '#/';
+  });
+  window.addEventListener('hashchange', () => route(db));
+  route(db);
+}
+
+if (cloud) {
+  connectCloud(cloud);
+  void start(cloud);
+} else {
+  replace(root, problemScreen('Not connected to a database', 'This copy of ShaTu was built without a Firebase project, so it cannot sign anyone in. The README explains how to connect one.'));
+}

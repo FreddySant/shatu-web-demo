@@ -1,8 +1,9 @@
-import { browserStore, changePassword, passwordStrength, updateDisplayName } from '../engine/auth';
-import { h } from './dom';
+import type { Cloud } from '../cloud/service';
+import { passwordStrength } from '../engine/account';
+import { h, replace } from './dom';
 import { initials } from './meters';
 import { openDialog, toast } from './overlay';
-import { clearProgress, getAccount, setAccount } from './store';
+import { clearProgress, getAccount, updateAccount } from './store';
 
 function field(id: string, label: string, type: 'text' | 'password', value = '', autocomplete = 'off'): { wrap: HTMLElement; el: HTMLInputElement; error: HTMLElement } {
   const el = h('input', { id, type, value, autocomplete, spellcheck: 'false' });
@@ -12,36 +13,73 @@ function field(id: string, label: string, type: 'text' | 'password', value = '',
 }
 
 /** File > Account settings: a dialog with a Profile tab and a Password tab. */
-export function accountDialog(): void {
+export function accountDialog(cloud: Cloud): void {
   const account = getAccount();
   if (!account) return;
 
   const avatar = h('span', { class: 'avatar big' }, initials(account.displayName));
   const shownName = h('strong', null, account.displayName);
+  const emailStatus = h('div', { class: 'email-status' });
+
+  const renderEmailStatus = () => {
+    const current = getAccount();
+    if (!current) return;
+    const resend = h('button', { class: 'btn quiet small-btn', type: 'button' }, 'Send the link again');
+    const check = h('button', { class: 'btn quiet small-btn', type: 'button' }, 'I clicked the link');
+    resend.addEventListener('click', async () => {
+      resend.disabled = true;
+      const result = await cloud.resendVerification();
+      resend.disabled = false;
+      toast(result.ok ? 'Verification email sent' : 'Email not sent', result.ok ? `Check ${current.email}` : result.message, result.ok ? 'success' : 'info');
+    });
+    check.addEventListener('click', async () => {
+      check.disabled = true;
+      try {
+        const refreshed = await cloud.refresh();
+        if (refreshed) updateAccount(refreshed);
+      } catch {
+        toast('Could not check', 'No connection to the server.', 'info');
+      }
+      check.disabled = false;
+      renderEmailStatus();
+    });
+    replace(
+      emailStatus,
+      h('span', { class: current.emailVerified ? 'badge ok' : 'badge' }, current.emailVerified ? 'Verified' : 'Not verified'),
+      current.instructor ? h('span', { class: 'badge ok' }, 'Instructor') : null,
+      current.emailVerified ? null : h('div', { class: 'form-actions' }, resend, check),
+    );
+  };
+  renderEmailStatus();
 
   const name = field('settings-name', 'Full name', 'text', account.displayName, 'name');
+  const saveProfile = h('button', { class: 'btn', type: 'submit' }, 'Save profile');
   const profile = h(
     'form',
     {
       class: 'settings-form',
       novalidate: true,
-      onsubmit: (event: Event) => {
+      onsubmit: async (event: Event) => {
         event.preventDefault();
-        const result = updateDisplayName(browserStore, account.username, name.el.value);
+        saveProfile.disabled = true;
+        const result = await cloud.updateName(name.el.value);
+        saveProfile.disabled = false;
         if (!result.ok) {
           name.error.textContent = result.message;
           return;
         }
-        setAccount(result.value);
-        avatar.textContent = initials(result.value.displayName);
-        shownName.textContent = result.value.displayName;
-        name.el.value = result.value.displayName;
+        const current = getAccount();
+        if (current) updateAccount({ ...current, displayName: result.value });
+        avatar.textContent = initials(result.value);
+        shownName.textContent = result.value;
+        name.el.value = result.value;
         toast('Profile saved', '', 'success');
       },
     },
-    h('div', { class: 'profile-row' }, avatar, h('div', null, shownName, h('span', { class: 'muted small' }, `@${account.username}, member since ${new Date(account.created).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`))),
+    h('div', { class: 'profile-row' }, avatar, h('div', null, shownName, h('span', { class: 'muted small' }, `Member since ${new Date(account.created).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`))),
     name.wrap,
-    h('div', { class: 'form-actions' }, h('button', { class: 'btn', type: 'submit' }, 'Save profile')),
+    h('div', { class: 'field' }, h('label', null, 'Email'), h('p', { class: 'readonly' }, account.email), emailStatus),
+    h('div', { class: 'form-actions' }, saveProfile),
   );
 
   const current = field('settings-current', 'Current password', 'password', '', 'current-password');
@@ -55,6 +93,7 @@ export function accountDialog(): void {
   next.wrap.insertBefore(strength, next.error);
   const fields: Record<string, { error: HTMLElement; el: HTMLInputElement }> = { current, next, confirm };
   const submit = h('button', { class: 'btn', type: 'submit' }, 'Change password');
+  const formError = h('p', { class: 'form-error', role: 'alert' });
   const password = h(
     'form',
     {
@@ -63,13 +102,18 @@ export function accountDialog(): void {
       hidden: true,
       onsubmit: async (event: Event) => {
         event.preventDefault();
+        formError.textContent = '';
         submit.disabled = true;
-        const result = await changePassword(browserStore, account.username, current.el.value, next.el.value, confirm.el.value);
+        const result = await cloud.changePassword(current.el.value, next.el.value, confirm.el.value);
         submit.disabled = false;
         if (!result.ok) {
-          const target = fields[result.field ?? 'current'];
-          target.error.textContent = result.message;
-          target.el.focus();
+          const target = result.field ? fields[result.field] : undefined;
+          if (target) {
+            target.error.textContent = result.message;
+            target.el.focus();
+          } else {
+            formError.textContent = result.message;
+          }
           return;
         }
         current.el.value = next.el.value = confirm.el.value = '';
@@ -80,6 +124,7 @@ export function accountDialog(): void {
     current.wrap,
     next.wrap,
     confirm.wrap,
+    formError,
     h('div', { class: 'form-actions' }, submit),
   );
 
@@ -127,7 +172,7 @@ export function aboutDialog(): void {
         { class: 'kv-list' },
         h('div', null, h('dt', null, 'Tutoring model'), h('dd', null, 'VanLehn (2006): feedback and hints inside a problem, the next problem chosen from your progress')),
         h('div', null, h('dt', null, 'Hash standard'), h('dd', null, 'FIPS 180-4')),
-        h('div', null, h('dt', null, 'Runs on'), h('dd', null, 'The browser only. Accounts and progress are saved in this browser.')),
+        h('div', null, h('dt', null, 'Runs on'), h('dd', null, 'The browser, with accounts and progress stored in Firebase so they work from any computer.')),
         h('div', null, h('dt', null, 'Source'), h('dd', null, h('a', { href: 'https://github.com/FreddySant/shatu-web-demo', target: '_blank', rel: 'noopener' }, 'github.com/FreddySant/shatu-web-demo'))),
       ),
       h('p', { class: 'muted small' }, 'Proof of concept by Sigfredo Santiago for the CS493 Senior Capstone ShaTu project. Not an official Regis University site.'),
